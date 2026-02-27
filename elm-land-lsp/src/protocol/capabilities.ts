@@ -6,6 +6,7 @@ export const serverCapabilities = {
   },
   documentFormattingProvider: true,
   documentSymbolProvider: true,
+  hoverProvider: true,
   completionProvider: {
     triggerCharacters: ["."],
   },

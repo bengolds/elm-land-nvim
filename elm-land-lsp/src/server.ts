@@ -15,6 +15,7 @@ import { getDocumentSymbols } from "./features/document-symbol";
 import { getDefinition } from "./features/definition";
 import { getWorkspaceSymbols } from "./features/workspace-symbol";
 import { getCompletions } from "./features/completion";
+import { getHover } from "./features/hover";
 
 let initialized = false;
 let shuttingDown = false;
@@ -61,6 +62,16 @@ async function handleRequest(msg: RequestMessage): Promise<void> {
     case "shutdown": {
       shuttingDown = true;
       sendResponse(msg.id, null);
+      return;
+    }
+
+    case "textDocument/hover": {
+      const params = msg.params as {
+        textDocument: { uri: string };
+        position: { line: number; character: number };
+      };
+      const result = await getHover(params.textDocument.uri, params.position);
+      sendResponse(msg.id, result);
       return;
     }
 
