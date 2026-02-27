@@ -199,3 +199,65 @@ describe("workspace symbols", () => {
     expect(addSymbol.location.range.start.line).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("completion", () => {
+  test("completes qualified module access for local module", async () => {
+    // Open a file that has "import Helpers exposing (add, greet)"
+    // Then type "Helpers." to trigger completion
+    const source = `module Test exposing (..)
+
+import Helpers
+
+x = Helpers.
+`;
+    const uri = fixtureUri(SMALL_PROJECT, "src", "CompletionTest.elm");
+    client.openFile(uri, source);
+    await Bun.sleep(300);
+
+    const result = await client.request("textDocument/completion", {
+      textDocument: { uri },
+      position: { line: 4, character: 12 }, // after "Helpers."
+    });
+
+    expect(result).not.toBeNull();
+    expect(Array.isArray(result)).toBe(true);
+    const labels = result.map((c: any) => c.label);
+    expect(labels).toContain("add");
+    expect(labels).toContain("multiply");
+    expect(labels).toContain("greet");
+  });
+
+  test("returns null when not on a module dot", async () => {
+    const source = "module Test exposing (..)\n\nx = 42\n";
+    const uri = fixtureUri(SMALL_PROJECT, "src", "NoCompletion.elm");
+    client.openFile(uri, source);
+
+    const result = await client.request("textDocument/completion", {
+      textDocument: { uri },
+      position: { line: 2, character: 4 },
+    });
+
+    expect(result).toBeNull();
+  });
+
+  test("resolves import aliases", async () => {
+    const source = `module Test exposing (..)
+
+import Helpers as H
+
+x = H.
+`;
+    const uri = fixtureUri(SMALL_PROJECT, "src", "AliasTest.elm");
+    client.openFile(uri, source);
+    await Bun.sleep(300);
+
+    const result = await client.request("textDocument/completion", {
+      textDocument: { uri },
+      position: { line: 4, character: 6 }, // after "H."
+    });
+
+    expect(result).not.toBeNull();
+    const labels = result.map((c: any) => c.label);
+    expect(labels).toContain("add");
+  });
+});

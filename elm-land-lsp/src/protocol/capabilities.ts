@@ -6,6 +6,9 @@ export const serverCapabilities = {
   },
   documentFormattingProvider: true,
   documentSymbolProvider: true,
+  completionProvider: {
+    triggerCharacters: ["."],
+  },
   definitionProvider: true,
   workspaceSymbolProvider: true,
 };
