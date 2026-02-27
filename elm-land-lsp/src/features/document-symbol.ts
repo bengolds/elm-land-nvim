@@ -100,7 +100,7 @@ function expressionSymbols(expr: Node<Expression>): DocumentSymbol[] {
       return e.let.declarations.flatMap(letDeclSymbols).concat(expressionSymbols(e.let.expression));
 
     case "case":
-      return e.case.cases.flatMap(([_pat, caseExpr]) => expressionSymbols(caseExpr))
+      return (e.case.cases as any[]).flatMap((branch: any) => expressionSymbols(branch[1]))
         .concat(expressionSymbols(e.case.expression));
 
     case "ifBlock":
