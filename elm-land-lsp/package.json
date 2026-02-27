@@ -1,0 +1,11 @@
+{
+  "name": "elm-land-lsp",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "elm-land-lsp": "./bin/elm-land-lsp.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.9"
+  }
+}
