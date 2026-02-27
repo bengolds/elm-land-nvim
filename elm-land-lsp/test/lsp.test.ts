@@ -156,3 +156,46 @@ describe("formatting", () => {
     expect(result).toBeNull();
   });
 });
+
+describe("workspace symbols", () => {
+  test("returns all symbols with empty query", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Main.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Main.elm"), "utf-8");
+    client.openFile(uri, text);
+    await Bun.sleep(300);
+
+    const symbols = await client.request("workspace/symbol", { query: "" });
+    expect(Array.isArray(symbols)).toBe(true);
+    expect(symbols.length).toBeGreaterThan(5);
+
+    const names = symbols.map((s: any) => s.name);
+    expect(names).toContain("add");
+    expect(names).toContain("greet");
+    expect(names).toContain("Msg");
+    expect(names).toContain("Model");
+    expect(names).toContain("main");
+  });
+
+  test("fuzzy filters by query", async () => {
+    const symbols = await client.request("workspace/symbol", { query: "mult" });
+    expect(symbols.length).toBeGreaterThanOrEqual(1);
+    expect(symbols.some((s: any) => s.name === "multiply")).toBe(true);
+  });
+
+  test("returns correct symbol kinds", async () => {
+    const symbols = await client.request("workspace/symbol", { query: "" });
+    const msgSymbol = symbols.find((s: any) => s.name === "Msg");
+    expect(msgSymbol?.kind).toBe(10);
+
+    const modelSymbol = symbols.find((s: any) => s.name === "Model");
+    expect(modelSymbol?.kind).toBe(19);
+  });
+
+  test("symbols have valid locations", async () => {
+    const symbols = await client.request("workspace/symbol", { query: "add" });
+    const addSymbol = symbols.find((s: any) => s.name === "add");
+    expect(addSymbol).toBeDefined();
+    expect(addSymbol.location.uri).toContain("Helpers.elm");
+    expect(addSymbol.location.range.start.line).toBeGreaterThanOrEqual(0);
+  });
+});

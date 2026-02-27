@@ -7,4 +7,5 @@ export const serverCapabilities = {
   documentFormattingProvider: true,
   documentSymbolProvider: true,
   definitionProvider: true,
+  workspaceSymbolProvider: true,
 };

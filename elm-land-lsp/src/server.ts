@@ -13,9 +13,11 @@ import { runDiagnostics } from "./features/diagnostics";
 import { formatDocument } from "./features/formatting";
 import { getDocumentSymbols } from "./features/document-symbol";
 import { getDefinition } from "./features/definition";
+import { getWorkspaceSymbols } from "./features/workspace-symbol";
 
 let initialized = false;
 let shuttingDown = false;
+let rootUri = "";
 
 function send(message: ResponseMessage | object): void {
   process.stdout.write(encode(message));
@@ -40,6 +42,8 @@ export function sendNotification(method: string, params: unknown): void {
 async function handleRequest(msg: RequestMessage): Promise<void> {
   if (msg.method === "initialize") {
     initialized = true;
+    const params = msg.params as { rootUri?: string };
+    rootUri = params.rootUri ?? "";
     sendResponse(msg.id, {
       capabilities: serverCapabilities,
       serverInfo: { name: "elm-land-lsp", version: "0.1.0" },
@@ -86,6 +90,13 @@ async function handleRequest(msg: RequestMessage): Promise<void> {
         params.textDocument.uri,
         params.position
       );
+      sendResponse(msg.id, result);
+      return;
+    }
+
+    case "workspace/symbol": {
+      const params = msg.params as { query: string };
+      const result = await getWorkspaceSymbols(params.query, rootUri);
       sendResponse(msg.id, result);
       return;
     }
