@@ -6,6 +6,7 @@ import { parse } from "../elm-ast/bridge";
 import {
   toDeclarationName,
   isExposedFromModule,
+  typeAnnotationToString,
   type Declaration,
 } from "../elm-ast/types";
 
@@ -50,6 +51,10 @@ function resolveAlias(
   prefix: string
 ): string[] {
   const candidates = [prefix];
+
+  // Elm prelude aliases
+  const preludeAliases: Record<string, string> = { Cmd: "Platform.Cmd", Sub: "Platform.Sub" };
+  if (preludeAliases[prefix]) candidates.push(preludeAliases[prefix]);
 
   // Check for "import Foo.Bar as Alias" patterns
   const aliasRegex = /^import\s+([\w.]+)\s+as\s+(\w+)/gm;
@@ -191,11 +196,11 @@ function declToCompletionKind(decl: Declaration): number {
 
 function getTypeSignature(decl: Declaration): string | undefined {
   if (decl.type === "function" && decl.function.signature) {
-    return `${decl.function.declaration.value.name.value} : ...`;
+    return `${decl.function.declaration.value.name.value} : ${typeAnnotationToString(decl.function.signature.value.typeAnnotation)}`;
   }
-  if (decl.type === "typeAlias") return `type alias ${decl.typeAlias.name.value}`;
+  if (decl.type === "typeAlias") return `type alias ${decl.typeAlias.name.value} = ${typeAnnotationToString(decl.typeAlias.typeAnnotation)}`;
   if (decl.type === "typedecl") return `type ${decl.typedecl.name.value}`;
-  if (decl.type === "port") return `port ${decl.port.name.value}`;
+  if (decl.type === "port") return `port ${decl.port.name.value} : ${typeAnnotationToString(decl.port.typeAnnotation)}`;
   return undefined;
 }
 

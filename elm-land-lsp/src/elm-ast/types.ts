@@ -103,7 +103,43 @@ export type TypeAnnotation =
   | { type: "record"; record: Node<RecordField>[] }
   | { type: "genericRecord"; genericRecord: { name: Node<string>; values: Node<Node<RecordField>[]> } };
 
-export type RecordField = [Node<string>, Node<TypeAnnotation>];
+export type RecordField = { name: Node<string>; typeAnnotation: Node<TypeAnnotation> };
+
+export function typeAnnotationToString(ta: Node<TypeAnnotation>): string {
+  const t = ta.value;
+  switch (t.type) {
+    case "generic": return t.generic.value;
+    case "unit": return "()";
+    case "typed": {
+      const mn = t.typed.moduleNameAndName.value;
+      const name = mn.moduleName.length > 0 ? mn.moduleName.join(".") + "." + mn.name : mn.name;
+      if (t.typed.args.length === 0) return name;
+      const args = t.typed.args.map(typeAnnotationToString).join(" ");
+      return `${name} ${args}`;
+    }
+    case "function": {
+      const left = typeAnnotationToString(t.function.left);
+      const right = typeAnnotationToString(t.function.right);
+      const leftStr = t.function.left.value.type === "function" ? `(${left})` : left;
+      return `${leftStr} -> ${right}`;
+    }
+    case "tupled":
+      return "( " + t.tupled.map(typeAnnotationToString).join(", ") + " )";
+    case "record": {
+      const fields = ((t.record as any).value ?? t.record).map((f: any) =>
+        `${f.value.name.value} : ${typeAnnotationToString(f.value.typeAnnotation)}`
+      );
+      return fields.length === 0 ? "{}" : "{ " + fields.join(", ") + " }";
+    }
+    case "genericRecord": {
+      const name = t.genericRecord.name.value;
+      const fields = ((t.genericRecord.values as any).value ?? []).map((f: any) =>
+        `${f.value.name.value} : ${typeAnnotationToString(f.value.typeAnnotation)}`
+      );
+      return `{ ${name} | ${fields.join(", ")} }`;
+    }
+  }
+}
 
 export type Pattern =
   | { type: "all" }

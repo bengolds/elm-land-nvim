@@ -220,6 +220,13 @@ async function handleNotification(msg: NotificationMessage): Promise<void> {
         textDocument: { uri: string };
       };
       runDiagnostics(params.textDocument.uri);
+
+      // If elm.json was saved, re-run diagnostics for all open files
+      if (params.textDocument.uri.endsWith("elm.json")) {
+        for (const doc of documentStore.all()) {
+          if (doc.uri.endsWith(".elm")) runDiagnostics(doc.uri);
+        }
+      }
       return;
     }
   }

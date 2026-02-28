@@ -15,6 +15,7 @@ import {
   findCustomTypeVariantWithName,
   createImportTracker,
   toModuleName,
+  toModuleData,
 } from "../elm-ast/types";
 import type { Location, Position, Range } from "../protocol/messages";
 
@@ -237,6 +238,18 @@ function collectRefsInFile(
     }
   }
 
+  // Check module exposing list (for same-module definitions)
+  if (fileModuleName === target.defModule) {
+    const modData = toModuleData(ast);
+    if (modData.exposingList.value.type === "explicit") {
+      for (const exposed of modData.exposingList.value.explicit) {
+        if (getExposedNameStr(exposed.value) === target.name) {
+          locations.push({ uri: fileUri, range: elmRangeToLsp(exposed.range) });
+        }
+      }
+    }
+  }
+
   // Walk declarations
   for (const decl of ast.declarations) {
     // Check if this IS the definition
@@ -251,6 +264,14 @@ function collectRefsInFile(
             locations.push({ uri: fileUri, range: elmRangeToLsp(ctor.value.name.range) });
           }
         }
+      }
+    }
+
+    // Check type annotation — signature name
+    if (decl.value.type === "function" && decl.value.function.signature) {
+      const sigName = decl.value.function.signature.value.name;
+      if (sigName.value === target.name && fileModuleName === target.defModule) {
+        locations.push({ uri: fileUri, range: elmRangeToLsp(sigName.range) });
       }
     }
 

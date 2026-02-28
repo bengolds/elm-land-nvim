@@ -141,7 +141,13 @@ async function runDiagnosticsNow(uri: string): Promise<void> {
         diagnostics: diags,
       });
     }
-  } catch {
-    // elm binary not found or spawn failed
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("ENOENT") || msg.includes("not found")) {
+      sendNotification("window/showMessage", {
+        type: 1, // Error
+        message: 'elm binary not found. Install it with "npm install -g elm" or ensure it is on your PATH.',
+      });
+    }
   }
 }

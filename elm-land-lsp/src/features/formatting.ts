@@ -1,4 +1,5 @@
 import { documentStore } from "../state/document-store";
+import { sendNotification } from "../server";
 import { findElmJsonFor, uriToPath } from "../project/elm-json";
 import type { TextEdit } from "../protocol/messages";
 
@@ -36,7 +37,14 @@ export async function formatDocument(uri: string): Promise<TextEdit[] | null> {
         newText: stdout,
       },
     ];
-  } catch {
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("ENOENT") || msg.includes("not found")) {
+      sendNotification("window/showMessage", {
+        type: 1,
+        message: 'elm-format not found. Install it with "npm install -g elm-format" or ensure it is on your PATH.',
+      });
+    }
     return null;
   }
 }

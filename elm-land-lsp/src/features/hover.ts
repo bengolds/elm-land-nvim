@@ -14,6 +14,7 @@ import {
   findCustomTypeVariantWithName,
   createImportTracker,
   isExposedFromModule,
+  typeAnnotationToString,
 } from "../elm-ast/types";
 import type { Position, Range } from "../protocol/messages";
 
@@ -44,7 +45,8 @@ function declHoverContent(decl: Declaration, moduleName?: string): string {
   if (decl.type === "function") {
     const name = decl.function.declaration.value.name.value;
     if (decl.function.signature) {
-      parts.push("```elm\n" + name + " : ...\n```");
+      const typeSig = typeAnnotationToString(decl.function.signature.value.typeAnnotation);
+      parts.push("```elm\n" + name + " : " + typeSig + "\n```");
     } else {
       parts.push("```elm\n" + name + "\n```");
     }
@@ -52,17 +54,22 @@ function declHoverContent(decl: Declaration, moduleName?: string): string {
       parts.push(decl.function.documentation.value);
     }
   } else if (decl.type === "typeAlias") {
-    parts.push("```elm\ntype alias " + decl.typeAlias.name.value + "\n```");
+    const typeSig = typeAnnotationToString(decl.typeAlias.typeAnnotation);
+    parts.push("```elm\ntype alias " + decl.typeAlias.name.value + " =\n    " + typeSig + "\n```");
     if (decl.typeAlias.documentation) {
       parts.push(decl.typeAlias.documentation.value);
     }
   } else if (decl.type === "typedecl") {
-    parts.push("```elm\ntype " + decl.typedecl.name.value + "\n```");
+    const ctors = decl.typedecl.constructors
+      .map((c) => c.value.name.value + (c.value.arguments.length > 0 ? " " + c.value.arguments.map(typeAnnotationToString).join(" ") : ""))
+      .join("\n    | ");
+    parts.push("```elm\ntype " + decl.typedecl.name.value + "\n    = " + ctors + "\n```");
     if (decl.typedecl.documentation) {
       parts.push(decl.typedecl.documentation.value);
     }
   } else if (decl.type === "port") {
-    parts.push("```elm\nport " + decl.port.name.value + "\n```");
+    const typeSig = typeAnnotationToString(decl.port.typeAnnotation);
+    parts.push("```elm\nport " + decl.port.name.value + " : " + typeSig + "\n```");
   }
 
   if (moduleName) {
