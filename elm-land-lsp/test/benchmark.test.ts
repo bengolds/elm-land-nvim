@@ -9,11 +9,10 @@ import { getDefinition } from "../src/features/definition";
 import { getCompletions } from "../src/features/completion";
 import { getHover } from "../src/features/hover";
 import { documentStore } from "../src/state/document-store";
-import { findElmJsonFor, pathToUri, uriToPath } from "../src/project/elm-json";
-import { NOREDINK_UI } from "./helpers";
+import { pathToUri } from "../src/project/elm-json";
+import { ELM_PKG_UNIVERSE } from "./helpers";
 
-const SRC_DIR = path.join(NOREDINK_UI, "src");
-const CATALOG_DIR = path.join(NOREDINK_UI, "component-catalog");
+const SRC_DIR = path.join(ELM_PKG_UNIVERSE, "src");
 
 function getAllElmFiles(dir: string): string[] {
   const results: string[] = [];
@@ -46,7 +45,7 @@ function printStats(label: string, times: number[]) {
   );
 }
 
-describe("benchmark: noredink-ui", () => {
+describe("benchmark: elm-package-universe", () => {
   let elmFiles: string[];
   let largestFiles: { path: string; size: number }[];
 

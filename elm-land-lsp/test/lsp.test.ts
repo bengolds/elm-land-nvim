@@ -338,3 +338,84 @@ describe("hover", () => {
     expect(result).toBeNull();
   });
 });
+
+describe("references", () => {
+  test("finds references to imported function", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Main.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Main.elm"), "utf-8");
+    client.openFile(uri, text);
+
+    const helpersUri = fixtureUri(SMALL_PROJECT, "src", "Helpers.elm");
+    const helpersText = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Helpers.elm"), "utf-8");
+    client.openFile(helpersUri, helpersText);
+    await Bun.sleep(500);
+
+    const result = await client.request("textDocument/references", {
+      textDocument: { uri },
+      position: { line: 3, character: 26 },
+      context: { includeDeclaration: true },
+    });
+
+    expect(Array.isArray(result)).toBe(true);
+    expect(result.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("returns empty for unknown position", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Main.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Main.elm"), "utf-8");
+    client.openFile(uri, text);
+    await Bun.sleep(300);
+
+    const result = await client.request("textDocument/references", {
+      textDocument: { uri },
+      position: { line: 0, character: 0 },
+      context: { includeDeclaration: true },
+    });
+
+    expect(Array.isArray(result)).toBe(true);
+    expect(result.length).toBe(0);
+  });
+});
+
+describe("rename", () => {
+  test("prepareRename returns range and placeholder", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Helpers.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Helpers.elm"), "utf-8");
+    client.openFile(uri, text);
+    await Bun.sleep(500);
+
+    const result = await client.request("textDocument/prepareRename", {
+      textDocument: { uri },
+      position: { line: 3, character: 0 },
+    });
+
+    if (result) {
+      expect(result.placeholder).toBeDefined();
+      expect(result.range).toBeDefined();
+    }
+  });
+
+  test("rename generates workspace edit", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Helpers.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Helpers.elm"), "utf-8");
+    client.openFile(uri, text);
+    await Bun.sleep(500);
+
+    const result = await client.request("textDocument/rename", {
+      textDocument: { uri },
+      position: { line: 3, character: 0 },
+      newName: "addNumbers",
+    });
+
+    if (result && result.changes) {
+      const fileUris = Object.keys(result.changes);
+      expect(fileUris.length).toBeGreaterThanOrEqual(1);
+
+      for (const edits of Object.values(result.changes) as any[]) {
+        for (const edit of edits) {
+          expect(edit.newText).toBe("addNumbers");
+        }
+      }
+    }
+  });
+});

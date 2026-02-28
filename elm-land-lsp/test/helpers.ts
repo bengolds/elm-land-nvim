@@ -3,8 +3,7 @@ import { encode } from "../src/protocol/transport";
 
 export const FIXTURES = path.resolve(import.meta.dir, "fixtures");
 export const SMALL_PROJECT = path.join(FIXTURES, "small-project");
-export const NOREDINK_UI = path.join(FIXTURES, "noredink-ui");
-export const NOREDINK_CATALOG = path.join(NOREDINK_UI, "component-catalog");
+export const ELM_PKG_UNIVERSE = path.join(FIXTURES, "elm-package-universe");
 
 export function fileUri(fsPath: string): string {
   return "file://" + fsPath;
@@ -17,8 +16,6 @@ export function fixtureUri(project: string, ...parts: string[]): string {
 export function fixturePath(project: string, ...parts: string[]): string {
   return path.join(project, ...parts);
 }
-
-// --- LSP Client Harness ---
 
 export type LspClient = {
   request(method: string, params: object): Promise<any>;
@@ -34,64 +31,63 @@ export async function startLsp(): Promise<LspClient> {
   );
 
   let idCounter = 0;
-  let readBuf = "";
+  const pendingResponses = new Map<number, { resolve: (v: any) => void }>();
+  let msgBuffer = "";
+  let dead = false;
+
+  // Single persistent read loop — never released
+  (async () => {
+    const reader = proc.stdout.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) { dead = true; break; }
+        msgBuffer += new TextDecoder().decode(value);
+        drainMessages();
+      }
+    } catch {
+      dead = true;
+    }
+  })();
+
+  function drainMessages() {
+    while (true) {
+      const match = msgBuffer.match(/Content-Length: (\d+)\r\n\r\n/);
+      if (!match) break;
+      const headerEnd = msgBuffer.indexOf("\r\n\r\n") + 4;
+      const contentLength = parseInt(match[1]!);
+      if (msgBuffer.length < headerEnd + contentLength) break;
+      const body = msgBuffer.slice(headerEnd, headerEnd + contentLength);
+      msgBuffer = msgBuffer.slice(headerEnd + contentLength);
+
+      const msg = JSON.parse(body);
+      if ("id" in msg && pendingResponses.has(msg.id)) {
+        const { resolve } = pendingResponses.get(msg.id)!;
+        pendingResponses.delete(msg.id);
+        resolve(msg.error ?? msg.result);
+      }
+      // Notifications (diagnostics etc.) are silently discarded
+    }
+  }
 
   function write(msg: object) {
     proc.stdin.write(encode(msg));
   }
 
-  // Read a single complete LSP message from stdout
-  async function readMessage(): Promise<any> {
-    const reader = proc.stdout.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) throw new Error("Process exited unexpectedly");
-        readBuf += new TextDecoder().decode(value);
-
-        while (true) {
-          const match = readBuf.match(/Content-Length: (\d+)\r\n\r\n/);
-          if (!match) break;
-          const headerEnd = readBuf.indexOf("\r\n\r\n") + 4;
-          const contentLength = parseInt(match[1]!);
-          if (readBuf.length < headerEnd + contentLength) break;
-          const body = readBuf.slice(headerEnd, headerEnd + contentLength);
-          readBuf = readBuf.slice(headerEnd + contentLength);
-          reader.releaseLock();
-          return JSON.parse(body);
-        }
-      }
-    } catch (e) {
-      reader.releaseLock();
-      throw e;
-    }
-  }
-
-  // Read messages until we get a response with the given ID,
-  // discarding any notifications along the way
-  async function waitForResponse(id: number): Promise<any> {
-    const deadline = Date.now() + 15000;
-    while (Date.now() < deadline) {
-      const msg = await Promise.race([
-        readMessage(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Timed out waiting for response id=${id}`)), deadline - Date.now())
-        ),
-      ]);
-      if ("id" in msg && msg.id === id) {
-        if (msg.error) return msg.error;
-        return msg.result;
-      }
-      // Otherwise it's a notification (e.g., diagnostics) or wrong ID — discard it
-    }
-    throw new Error(`Timed out waiting for response id=${id}`);
-  }
-
   const client: LspClient = {
     async request(method, params) {
+      if (dead) throw new Error("LSP process is dead");
       const id = ++idCounter;
-      write({ jsonrpc: "2.0", id, method, params });
-      return waitForResponse(id);
+      return new Promise((resolve, reject) => {
+        pendingResponses.set(id, { resolve });
+        write({ jsonrpc: "2.0", id, method, params });
+        setTimeout(() => {
+          if (pendingResponses.has(id)) {
+            pendingResponses.delete(id);
+            reject(new Error(`Request ${method} (id=${id}) timed out`));
+          }
+        }, 30000);
+      });
     },
 
     notify(method, params) {
@@ -113,7 +109,6 @@ export async function startLsp(): Promise<LspClient> {
     },
   };
 
-  // Initialize
   await client.request("initialize", {
     processId: null,
     capabilities: {},

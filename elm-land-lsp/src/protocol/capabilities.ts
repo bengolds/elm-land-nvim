@@ -11,5 +11,7 @@ export const serverCapabilities = {
     triggerCharacters: ["."],
   },
   definitionProvider: true,
+  referencesProvider: true,
+  renameProvider: { prepareProvider: true },
   workspaceSymbolProvider: true,
 };

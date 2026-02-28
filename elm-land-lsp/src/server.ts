@@ -16,6 +16,8 @@ import { getDefinition } from "./features/definition";
 import { getWorkspaceSymbols } from "./features/workspace-symbol";
 import { getCompletions } from "./features/completion";
 import { getHover } from "./features/hover";
+import { findReferences } from "./features/references";
+import { prepareRename, doRename } from "./features/rename";
 
 let initialized = false;
 let shuttingDown = false;
@@ -111,6 +113,46 @@ async function handleRequest(msg: RequestMessage): Promise<void> {
       const result = await getDefinition(
         params.textDocument.uri,
         params.position
+      );
+      sendResponse(msg.id, result);
+      return;
+    }
+
+    case "textDocument/prepareRename": {
+      const params = msg.params as {
+        textDocument: { uri: string };
+        position: { line: number; character: number };
+      };
+      const result = await prepareRename(params.textDocument.uri, params.position);
+      sendResponse(msg.id, result);
+      return;
+    }
+
+    case "textDocument/rename": {
+      const params = msg.params as {
+        textDocument: { uri: string };
+        position: { line: number; character: number };
+        newName: string;
+      };
+      const result = await doRename(
+        params.textDocument.uri,
+        params.position,
+        params.newName
+      );
+      sendResponse(msg.id, result);
+      return;
+    }
+
+    case "textDocument/references": {
+      const params = msg.params as {
+        textDocument: { uri: string };
+        position: { line: number; character: number };
+        context: { includeDeclaration: boolean };
+      };
+      const result = await findReferences(
+        params.textDocument.uri,
+        params.position,
+        params.context?.includeDeclaration ?? true
       );
       sendResponse(msg.id, result);
       return;
