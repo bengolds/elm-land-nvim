@@ -139,23 +139,42 @@ cp worker.js /path/to/elm-land-lsp/src/elm-ast/worker.min.js
 
 Requires `elm` 0.19.1 and the elm-land/vscode repo cloned to `/tmp/elm-land-vscode`.
 
-## Feature Gap: What elm-land/vscode Has That We're Missing
+## Feature Comparison vs elm-land/vscode
 
-| Priority | Feature | LSP Method | Status | Complexity |
-|----------|---------|------------|--------|------------|
-| P0 | Workspace Symbols | `workspace/symbol` | **Missing** | LOW — regex-based, no AST needed |
-| P1 | Autocomplete | `textDocument/completion` | **Missing** | MEDIUM — triggers on `.`, reads `docs.json` from ELM_HOME |
-| P2 | Hover/Tooltips | `textDocument/hover` | **Missing** (not in VSCode either) | MEDIUM-HIGH — type sigs + docs |
-| P3 | Document Links | `textDocument/documentLink` | **Missing** | MEDIUM — link to package docs URLs |
-| P4 | HTML to Elm | `textDocument/codeAction` | **Missing** | MEDIUM — needs compiled Elm worker |
+Reference clone at `elm-land-vscode/` (gitignored). Source files in `elm-land-vscode/src/features/`.
 
-### Additional features NOT in elm-land/vscode (net-new):
-- Find References (`textDocument/references`) — HIGH complexity
-- Rename (`textDocument/rename`) — VERY HIGH complexity
-- elm-review integration — MEDIUM complexity
+### Features we match or exceed:
 
-### Notes on VSCode extension's autocomplete:
-- Only triggers on `.` (qualified `Module.name` access)
-- Does NOT complete unqualified local names or keywords
-- Reads `docs.json` from `$ELM_HOME/<version>/packages/<author>/<package>/<version>/docs.json`
-- Our `elm-json.ts` already has `loadDocs()` for reading these files
+| Feature | elm-land | Us | Notes |
+|---------|----------|-----|-------|
+| Diagnostics | Yes | Yes | We also notify when elm binary missing |
+| Formatting | Yes | Yes | We also notify when elm-format missing |
+| Document Symbols | Yes | Yes | Parity |
+| Jump to Definition | Yes | **Better** | We handle type annotations, case patterns, local vars, recordUpdate names |
+| Workspace Symbols | Yes | **Better** | Our symbol kinds are more specific |
+| Autocomplete | Yes | Yes | Qualified `.` completion with real type sigs |
+| Hover | No | **Yes** | Full type signatures + docs from AST and package docs.json |
+| Find References | No | **Yes** | Cross-file, walks expressions + imports + module exposing + type sigs |
+| Rename | No | **Yes** | Full project rename including imports and module exposing |
+
+### Remaining gaps:
+
+| Feature | Difficulty | Notes |
+|---------|-----------|-------|
+| Document Links | MEDIUM | Link package refs to docs URLs |
+| HTML to Elm | HARD | Niche code action |
+
+### Running tests:
+```bash
+cd elm-land-lsp
+bun test test/transport.test.ts test/ast.test.ts test/elm-json.test.ts test/lsp.test.ts test/perf.test.ts test/benchmark.test.ts
+```
+73 tests, ~21s (most time in elm-package-universe benchmark parsing 7K files).
+
+### Performance (elm-package-universe, 7000 files, 601K LOC):
+- Parse throughput: ~830 files/sec
+- Document symbols: p50=37ms
+- Workspace symbols: p50=7ms (cached)
+- Completion: p50=1ms
+- Hover: p50=0.7ms
+- Definition: p50=0.7ms
