@@ -198,11 +198,32 @@ export async function getHover(
     }
   }
 
-  // Check declarations for functionOrValue under cursor
+  // Check declarations
   const tracker = createImportTracker(ast);
 
   for (const decl of ast.declarations) {
     if (!positionInRange(position, decl.range)) continue;
+
+    // Cursor on the declaration name itself
+    const d = decl.value;
+    if (d.type === "function") {
+      const nameNode = d.function.declaration.value.name;
+      if (positionInRange(position, nameNode.range)) {
+        return { contents: { kind: "markdown", value: declHoverContent(d) }, range: elmRangeToLsp(nameNode.range) };
+      }
+      // Also check signature name
+      if (d.function.signature && positionInRange(position, d.function.signature.value.name.range)) {
+        return { contents: { kind: "markdown", value: declHoverContent(d) }, range: elmRangeToLsp(d.function.signature.value.name.range) };
+      }
+    } else if (d.type === "typeAlias" && positionInRange(position, d.typeAlias.name.range)) {
+      return { contents: { kind: "markdown", value: declHoverContent(d) }, range: elmRangeToLsp(d.typeAlias.name.range) };
+    } else if (d.type === "typedecl" && positionInRange(position, d.typedecl.name.range)) {
+      return { contents: { kind: "markdown", value: declHoverContent(d) }, range: elmRangeToLsp(d.typedecl.name.range) };
+    } else if (d.type === "port" && positionInRange(position, d.port.name.range)) {
+      return { contents: { kind: "markdown", value: declHoverContent(d) }, range: elmRangeToLsp(d.port.name.range) };
+    }
+
+    // Walk expression body
     const result = await findHoverInExpression(
       uri, decl, position, ast, elmJson, tracker
     );
