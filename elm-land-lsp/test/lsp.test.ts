@@ -124,10 +124,94 @@ describe("definition", () => {
 
     const result = await client.request("textDocument/definition", {
       textDocument: { uri },
-      position: { line: 0, character: 0 }, // "module" keyword
+      position: { line: 0, character: 0 },
     });
 
     expect(result).toBeNull();
+  });
+
+  test("module exposing list jumps to declaration", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Main.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Main.elm"), "utf-8");
+    client.openFile(uri, text);
+    await Bun.sleep(500);
+
+    // Line 0: "module Main exposing (main)" — cursor on "main" in exposing
+    const result = await client.request("textDocument/definition", {
+      textDocument: { uri },
+      position: { line: 0, character: 23 },
+    });
+
+    expect(result).not.toBeNull();
+    expect(result.uri).toContain("Main.elm");
+    // Should jump to the main declaration, not stay on line 0
+    expect(result.range.start.line).toBeGreaterThan(0);
+  });
+
+  test("type annotation jumps to type definition", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Main.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Main.elm"), "utf-8");
+    client.openFile(uri, text);
+    await Bun.sleep(500);
+
+    // Line 15: "update : Msg -> Model -> Model" — cursor on "Msg"
+    const result = await client.request("textDocument/definition", {
+      textDocument: { uri },
+      position: { line: 15, character: 10 },
+    });
+
+    expect(result).not.toBeNull();
+    expect(result.uri).toContain("Types.elm");
+  });
+
+  test("case pattern constructor jumps to type", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Main.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Main.elm"), "utf-8");
+    client.openFile(uri, text);
+    await Bun.sleep(500);
+
+    // Line 18: "        Increment ->" — cursor on "Increment"
+    const result = await client.request("textDocument/definition", {
+      textDocument: { uri },
+      position: { line: 18, character: 10 },
+    });
+
+    expect(result).not.toBeNull();
+    expect(result.uri).toContain("Types.elm");
+  });
+
+  test("local variable jumps to binding", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Main.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Main.elm"), "utf-8");
+    client.openFile(uri, text);
+    await Bun.sleep(500);
+
+    // Line 25: "            { model | name = name }" — cursor on second "name" (the variable, col 29-32)
+    // "name" is bound in the case pattern "SetName name ->" on line 24
+    const result = await client.request("textDocument/definition", {
+      textDocument: { uri },
+      position: { line: 25, character: 30 },
+    });
+
+    expect(result).not.toBeNull();
+    // Should point to the pattern binding on line 24
+    expect(result.range.start.line).toBe(24);
+  });
+
+  test("recordUpdate variable jumps to binding", async () => {
+    const uri = fixtureUri(SMALL_PROJECT, "src", "Main.elm");
+    const text = fs.readFileSync(fixturePath(SMALL_PROJECT, "src", "Main.elm"), "utf-8");
+    client.openFile(uri, text);
+    await Bun.sleep(500);
+
+    // Line 19: "            { model | count = model.count + 1 }" — cursor on first "model"
+    const result = await client.request("textDocument/definition", {
+      textDocument: { uri },
+      position: { line: 19, character: 14 },
+    });
+
+    expect(result).not.toBeNull();
+    // "model" is a function parameter — should resolve to line 16 where "update msg model ="
   });
 });
 

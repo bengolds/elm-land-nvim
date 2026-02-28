@@ -2,19 +2,20 @@ import * as fs from "fs/promises";
 import { parse } from "../elm-ast/bridge";
 import { documentStore } from "../state/document-store";
 import { getCachedAst, setCachedAst } from "../state/ast-cache";
-import { findElmJsonFor, uriToPath, pathToUri } from "../project/elm-json";
+import { findElmJsonFor, uriToPath, pathToUri, type ElmJsonFile } from "../project/elm-json";
 import { resolveModuleToFile } from "../project/module-resolver";
 import {
   type Ast,
   type Node,
-  type Declaration,
   type Expression,
-  type LetDeclaration,
+  type Pattern,
+  type TypeAnnotation,
   type Range as ElmRange,
+  type ImportTracker,
   findDeclarationWithName,
   findCustomTypeVariantWithName,
   createImportTracker,
-  patternDefinitionNames,
+  toModuleData,
   isExposedFromModule,
 } from "../elm-ast/types";
 import type { Location, Position, Range } from "../protocol/messages";
@@ -26,7 +27,7 @@ function elmRangeToLsp(r: ElmRange): Range {
   };
 }
 
-function positionInRange(pos: Position, r: ElmRange): boolean {
+function posInRange(pos: Position, r: ElmRange): boolean {
   const line = pos.line + 1;
   const col = pos.character + 1;
   if (line < r[0] || line > r[2]) return false;
@@ -44,6 +45,50 @@ async function parseFile(filePath: string): Promise<Ast | undefined> {
   }
 }
 
+function getExposedName(expose: any): string {
+  switch (expose.type) {
+    case "function": return expose.function.name;
+    case "typeOrAlias": return expose.typeOrAlias.name;
+    case "typeexpose": return expose.typeexpose.name;
+    case "infix": return expose.infix.name;
+    default: return "";
+  }
+}
+
+// Track local bindings with their source location for jump-to-local-var
+type ScopeBinding = { name: string; range: ElmRange };
+type Scope = ScopeBinding[];
+
+function scopeHas(scope: Scope, name: string): ScopeBinding | undefined {
+  for (let i = scope.length - 1; i >= 0; i--) {
+    if (scope[i]!.name === name) return scope[i];
+  }
+  return undefined;
+}
+
+function bindingsFromPattern(pattern: Node<Pattern>): ScopeBinding[] {
+  const p = pattern.value;
+  switch (p.type) {
+    case "var": return [{ name: p.var.value, range: pattern.range }];
+    case "as": return [...bindingsFromPattern(p.as.pattern), { name: p.as.name.value, range: p.as.name.range }];
+    case "tuple": return p.tuple.flatMap(bindingsFromPattern);
+    case "uncons": return [...bindingsFromPattern(p.uncons.hd), ...bindingsFromPattern(p.uncons.tl)];
+    case "list": return p.list.flatMap(bindingsFromPattern);
+    case "named": return (p.named.patterns ?? []).flatMap(bindingsFromPattern);
+    case "parentisized": return bindingsFromPattern(p.parentisized);
+    case "record": return p.record.map((n) => ({ name: n.value, range: n.range }));
+    default: return [];
+  }
+}
+
+// --- Context for resolution ---
+type Ctx = {
+  uri: string;
+  ast: Ast;
+  elmJson: ElmJsonFile;
+  tracker: ImportTracker;
+};
+
 export async function getDefinition(
   uri: string,
   position: Position
@@ -60,24 +105,38 @@ export async function getDefinition(
   const elmJson = await findElmJsonFor(filePath);
   if (!elmJson) return null;
 
-  // Check if cursor is on an import module name
+  const tracker = createImportTracker(ast);
+  const ctx: Ctx = { uri, ast, elmJson, tracker };
+
+  // 1. Module definition exposing list
+  const modData = toModuleData(ast);
+  if (modData.exposingList.value.type === "explicit") {
+    for (const exposed of modData.exposingList.value.explicit) {
+      if (posInRange(position, exposed.range)) {
+        const name = getExposedName(exposed.value);
+        const decl = findDeclarationWithName(ast, name);
+        if (decl) return { uri, range: elmRangeToLsp(decl.range) };
+        const variant = findCustomTypeVariantWithName(ast, name);
+        if (variant) return { uri, range: elmRangeToLsp(variant.constructor.range) };
+        return null;
+      }
+    }
+  }
+
+  // 2. Imports
   for (const imp of ast.imports) {
-    if (positionInRange(position, imp.value.moduleName.range)) {
+    if (posInRange(position, imp.value.moduleName.range)) {
       const moduleName = imp.value.moduleName.value.join(".");
       const targetPath = await resolveModuleToFile(moduleName, elmJson);
       if (targetPath) {
-        return {
-          uri: pathToUri(targetPath),
-          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
-        };
+        return { uri: pathToUri(targetPath), range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } };
       }
       return null;
     }
 
-    // Check if cursor is on an explicitly imported value
     if (imp.value.exposingList?.value.type === "explicit") {
       for (const exposed of imp.value.exposingList.value.explicit) {
-        if (positionInRange(position, exposed.range)) {
+        if (posInRange(position, exposed.range)) {
           const moduleName = imp.value.moduleName.value.join(".");
           const name = getExposedName(exposed.value);
           return await findInModule(moduleName, name, elmJson);
@@ -86,64 +145,217 @@ export async function getDefinition(
     }
   }
 
-  // Walk declarations to find what's under the cursor
-  const tracker = createImportTracker(ast);
-
+  // 3. Declarations
   for (const decl of ast.declarations) {
-    if (!positionInRange(position, decl.range)) continue;
-    const result = await findInDeclaration(uri, decl, position, ast, elmJson, tracker, []);
-    if (result) return result;
+    if (!posInRange(position, decl.range)) continue;
+    const d = decl.value;
+
+    // Type annotations
+    if (d.type === "function" && d.function.signature) {
+      const result = await findInTypeAnnotation(d.function.signature.value.typeAnnotation, position, ctx);
+      if (result) return result;
+    }
+    if (d.type === "typeAlias") {
+      const result = await findInTypeAnnotation(d.typeAlias.typeAnnotation, position, ctx);
+      if (result) return result;
+    }
+    if (d.type === "typedecl") {
+      for (const ctor of d.typedecl.constructors) {
+        for (const arg of ctor.value.arguments) {
+          const result = await findInTypeAnnotation(arg, position, ctx);
+          if (result) return result;
+        }
+      }
+    }
+    if (d.type === "port") {
+      const result = await findInTypeAnnotation(d.port.typeAnnotation, position, ctx);
+      if (result) return result;
+    }
+
+    // Function body
+    if (d.type === "function") {
+      const funcDecl = d.function.declaration.value;
+      const argBindings = funcDecl.arguments.flatMap(bindingsFromPattern);
+
+      // Check patterns themselves for constructor refs
+      for (const argPat of funcDecl.arguments) {
+        const result = await findInPattern(argPat, position, ctx);
+        if (result) return result;
+      }
+
+      return findInExpr(funcDecl.expression, position, ctx, argBindings);
+    }
+
+    if (d.type === "destructuring") {
+      const result = await findInPattern(d.destructuring.pattern, position, ctx);
+      if (result) return result;
+      return findInExpr(d.destructuring.expression, position, ctx, []);
+    }
   }
 
   return null;
 }
 
-function getExposedName(expose: import("../elm-ast/types").TopLevelExpose): string {
-  switch (expose.type) {
-    case "function": return expose.function.name;
-    case "typeOrAlias": return expose.typeOrAlias.name;
-    case "typeexpose": return expose.typeexpose.name;
-    case "infix": return expose.infix.name;
-  }
-}
+// --- Type annotation walking ---
 
-type ScopeNames = string[];
-
-async function findInDeclaration(
-  currentUri: string,
-  decl: Node<Declaration>,
+async function findInTypeAnnotation(
+  ta: Node<TypeAnnotation>,
   position: Position,
-  ast: Ast,
-  elmJson: import("../project/elm-json").ElmJsonFile,
-  tracker: import("../elm-ast/types").ImportTracker,
-  scope: ScopeNames
+  ctx: Ctx
 ): Promise<Location | null> {
-  const d = decl.value;
+  if (!posInRange(position, ta.range)) return null;
+  const t = ta.value;
 
-  if (d.type === "function") {
-    const funcDecl = d.function.declaration.value;
-    const argNames = funcDecl.arguments.flatMap((a) => patternDefinitionNames(a.value));
-    return findInExpression(currentUri, funcDecl.expression, position, ast, elmJson, tracker, [...scope, ...argNames]);
+  if (t.type === "typed") {
+    const mn = t.typed.moduleNameAndName.value;
+    if (posInRange(position, t.typed.moduleNameAndName.range)) {
+      const name = mn.name;
+      const moduleParts = mn.moduleName;
+
+      if (moduleParts.length > 0) {
+        const mod = moduleParts.join(".");
+        const resolved = ctx.tracker.aliasMapping.get(mod) ?? [mod];
+        for (const m of resolved) {
+          const r = await findInModule(m, name, ctx.elmJson);
+          if (r) return r;
+        }
+      } else {
+        // Same-file type
+        const decl = findDeclarationWithName(ctx.ast, name);
+        if (decl) return { uri: ctx.uri, range: elmRangeToLsp(decl.range) };
+
+        // Imported type
+        const fromExplicit = ctx.tracker.explicitExposing.get(name);
+        if (fromExplicit) {
+          for (const m of fromExplicit) {
+            const r = await findInModule(m, name, ctx.elmJson);
+            if (r) return r;
+          }
+        }
+        for (const m of ctx.tracker.unknownImports) {
+          const r = await findInModule(m, name, ctx.elmJson);
+          if (r) return r;
+        }
+      }
+      return null;
+    }
+
+    // Recurse into type args
+    for (const arg of t.typed.args) {
+      const r = await findInTypeAnnotation(arg, position, ctx);
+      if (r) return r;
+    }
   }
 
-  if (d.type === "destructuring") {
-    return findInExpression(currentUri, d.destructuring.expression, position, ast, elmJson, tracker, scope);
+  if (t.type === "function") {
+    return (await findInTypeAnnotation(t.function.left, position, ctx)) ??
+           (await findInTypeAnnotation(t.function.right, position, ctx));
+  }
+
+  if (t.type === "tupled") {
+    for (const item of t.tupled) {
+      const r = await findInTypeAnnotation(item, position, ctx);
+      if (r) return r;
+    }
+  }
+
+  if (t.type === "record") {
+    for (const field of (t.record as any).value ?? t.record) {
+      const r = await findInTypeAnnotation(field.value.typeAnnotation, position, ctx);
+      if (r) return r;
+    }
+  }
+
+  if (t.type === "genericRecord") {
+    for (const field of ((t.genericRecord.values as any).value ?? [])) {
+      const r = await findInTypeAnnotation(field.value.typeAnnotation, position, ctx);
+      if (r) return r;
+    }
   }
 
   return null;
 }
 
-async function findInExpression(
-  currentUri: string,
+// --- Pattern walking (for constructor references) ---
+
+async function findInPattern(
+  pat: Node<Pattern>,
+  position: Position,
+  ctx: Ctx
+): Promise<Location | null> {
+  if (!posInRange(position, pat.range)) return null;
+  const p = pat.value;
+
+  if (p.type === "named") {
+    const q = p.named.qualified;
+    // Check if cursor is on the constructor name (approximate: if in the pattern range but before the sub-patterns)
+    if (posInRange(position, pat.range)) {
+      const name = q.name;
+      const moduleParts = q.moduleName;
+
+      if (moduleParts.length > 0) {
+        const mod = moduleParts.join(".");
+        const resolved = ctx.tracker.aliasMapping.get(mod) ?? [mod];
+        for (const m of resolved) {
+          const r = await findInModule(m, name, ctx.elmJson);
+          if (r) return r;
+        }
+      } else {
+        // Same-file variant
+        const variant = findCustomTypeVariantWithName(ctx.ast, name);
+        if (variant) return { uri: ctx.uri, range: elmRangeToLsp(variant.constructor.range) };
+
+        // Imported variant
+        const fromExplicit = ctx.tracker.explicitExposing.get(name);
+        if (fromExplicit) {
+          for (const m of fromExplicit) {
+            const r = await findInModule(m, name, ctx.elmJson);
+            if (r) return r;
+          }
+        }
+        for (const m of ctx.tracker.unknownImports) {
+          const r = await findInModule(m, name, ctx.elmJson);
+          if (r) return r;
+        }
+      }
+    }
+
+    // Recurse into sub-patterns
+    for (const subPat of p.named.patterns ?? []) {
+      const r = await findInPattern(subPat, position, ctx);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  if (p.type === "tuple") {
+    for (const sub of p.tuple) { const r = await findInPattern(sub, position, ctx); if (r) return r; }
+  }
+  if (p.type === "uncons") {
+    return (await findInPattern(p.uncons.hd, position, ctx)) ?? (await findInPattern(p.uncons.tl, position, ctx));
+  }
+  if (p.type === "list") {
+    for (const sub of p.list) { const r = await findInPattern(sub, position, ctx); if (r) return r; }
+  }
+  if (p.type === "as") {
+    return findInPattern(p.as.pattern, position, ctx);
+  }
+  if (p.type === "parentisized") {
+    return findInPattern(p.parentisized, position, ctx);
+  }
+
+  return null;
+}
+
+// --- Expression walking ---
+
+async function findInExpr(
   expr: Node<Expression>,
   position: Position,
-  ast: Ast,
-  elmJson: import("../project/elm-json").ElmJsonFile,
-  tracker: import("../elm-ast/types").ImportTracker,
-  scope: ScopeNames
+  ctx: Ctx,
+  scope: Scope
 ): Promise<Location | null> {
-  if (!positionInRange(position, expr.range)) return null;
-
+  if (!expr?.value || !posInRange(position, expr.range)) return null;
   const e = expr.value;
 
   switch (e.type) {
@@ -152,190 +364,169 @@ async function findInExpression(
       const moduleParts = e.functionOrValue.moduleName;
 
       if (moduleParts.length > 0) {
-        // Qualified reference: Module.something
-        const qualifiedModule = moduleParts.join(".");
-        const resolvedModules = tracker.aliasMapping.get(qualifiedModule) ?? [qualifiedModule];
-        for (const modName of resolvedModules) {
-          const result = await findInModule(modName, name, elmJson);
-          if (result) return result;
+        const mod = moduleParts.join(".");
+        const resolved = ctx.tracker.aliasMapping.get(mod) ?? [mod];
+        for (const m of resolved) {
+          const r = await findInModule(m, name, ctx.elmJson);
+          if (r) return r;
         }
         return null;
       }
 
-      // Unqualified reference: check local scope first
-      if (scope.includes(name)) {
-        // It's a local binding — we could resolve to its exact location
-        // but finding the exact pattern node is complex. Return null to
-        // indicate "defined locally" rather than jumping nowhere useful.
-        return null;
+      // Local binding
+      const binding = scopeHas(scope, name);
+      if (binding) {
+        return { uri: ctx.uri, range: elmRangeToLsp(binding.range) };
       }
 
-      // Check same-file declarations
-      const localDecl = findDeclarationWithName(ast, name);
-      if (localDecl) {
-        return {
-          uri: currentUri,
-          range: elmRangeToLsp(localDecl.range),
-        };
-      }
+      // Same-file declaration
+      const localDecl = findDeclarationWithName(ctx.ast, name);
+      if (localDecl) return { uri: ctx.uri, range: elmRangeToLsp(localDecl.range) };
 
-      // Check same-file custom type variants
-      const localVariant = findCustomTypeVariantWithName(ast, name);
-      if (localVariant) {
-        return {
-          uri: currentUri,
-          range: elmRangeToLsp(localVariant.constructor.range),
-        };
-      }
+      // Same-file variant
+      const localVariant = findCustomTypeVariantWithName(ctx.ast, name);
+      if (localVariant) return { uri: ctx.uri, range: elmRangeToLsp(localVariant.constructor.range) };
 
-      // Check imports
-      const fromExplicit = tracker.explicitExposing.get(name);
+      // Imports
+      const fromExplicit = ctx.tracker.explicitExposing.get(name);
       if (fromExplicit) {
-        for (const modName of fromExplicit) {
-          const result = await findInModule(modName, name, elmJson);
-          if (result) return result;
+        for (const m of fromExplicit) {
+          const r = await findInModule(m, name, ctx.elmJson);
+          if (r) return r;
         }
       }
-
-      // Check expose-all imports
-      for (const modName of tracker.unknownImports) {
-        const result = await findInModule(modName, name, elmJson);
-        if (result) return result;
+      for (const m of ctx.tracker.unknownImports) {
+        const r = await findInModule(m, name, ctx.elmJson);
+        if (r) return r;
       }
-
       return null;
     }
 
     case "let": {
-      const letNames: string[] = [];
-      for (const letDecl of e.let.declarations) {
-        if (letDecl.value.type === "function") {
-          letNames.push(letDecl.value.function.declaration.value.name.value);
-        } else if (letDecl.value.type === "destructuring") {
-          letNames.push(...patternDefinitionNames(letDecl.value.destructuring.pattern.value));
+      const letBindings: Scope = [];
+      for (const d of e.let.declarations) {
+        if (d.value.type === "function") {
+          const n = d.value.function.declaration.value.name;
+          letBindings.push({ name: n.value, range: n.range });
+        } else if (d.value.type === "destructuring") {
+          letBindings.push(...bindingsFromPattern(d.value.destructuring.pattern));
         }
       }
-      const letScope = [...scope, ...letNames];
+      const letScope = [...scope, ...letBindings];
 
-      for (const letDecl of e.let.declarations) {
-        if (positionInRange(position, letDecl.range)) {
-          return findInLetDeclaration(currentUri, letDecl, position, ast, elmJson, tracker, letScope);
+      for (const d of e.let.declarations) {
+        if (!posInRange(position, d.range)) continue;
+        if (d.value.type === "function") {
+          const argBindings = d.value.function.declaration.value.arguments.flatMap(bindingsFromPattern);
+          for (const argPat of d.value.function.declaration.value.arguments) {
+            const r = await findInPattern(argPat, position, ctx);
+            if (r) return r;
+          }
+          return findInExpr(d.value.function.declaration.value.expression, position, ctx, [...letScope, ...argBindings]);
+        }
+        if (d.value.type === "destructuring") {
+          const r = await findInPattern(d.value.destructuring.pattern, position, ctx);
+          if (r) return r;
+          return findInExpr(d.value.destructuring.expression, position, ctx, letScope);
         }
       }
-
-      return findInExpression(currentUri, e.let.expression, position, ast, elmJson, tracker, letScope);
+      return findInExpr(e.let.expression, position, ctx, letScope);
     }
 
     case "case": {
-      const caseExprResult = await findInExpression(currentUri, e.case.expression, position, ast, elmJson, tracker, scope);
-      if (caseExprResult) return caseExprResult;
-
-      for (const [pattern, caseExpr] of e.case.cases) {
-        const patNames = patternDefinitionNames(pattern.value);
-        const result = await findInExpression(currentUri, caseExpr, position, ast, elmJson, tracker, [...scope, ...patNames]);
-        if (result) return result;
+      const r = await findInExpr(e.case.expression, position, ctx, scope);
+      if (r) return r;
+      for (const branch of e.case.cases as any[]) {
+        const pat = branch.pattern as Node<Pattern>;
+        const patResult = await findInPattern(pat, position, ctx);
+        if (patResult) return patResult;
+        const patBindings = bindingsFromPattern(pat);
+        const exprResult = await findInExpr(branch.expression, position, ctx, [...scope, ...patBindings]);
+        if (exprResult) return exprResult;
       }
       return null;
     }
 
     case "lambda": {
-      const lambdaNames = e.lambda.patterns.flatMap((p) => patternDefinitionNames(p.value));
-      return findInExpression(currentUri, e.lambda.expression, position, ast, elmJson, tracker, [...scope, ...lambdaNames]);
+      const lambdaBindings = e.lambda.patterns.flatMap(bindingsFromPattern);
+      for (const pat of e.lambda.patterns) {
+        const r = await findInPattern(pat, position, ctx);
+        if (r) return r;
+      }
+      return findInExpr(e.lambda.expression, position, ctx, [...scope, ...lambdaBindings]);
     }
 
     case "application": {
       for (const arg of e.application) {
-        const result = await findInExpression(currentUri, arg, position, ast, elmJson, tracker, scope);
-        if (result) return result;
+        const r = await findInExpr(arg, position, ctx, scope);
+        if (r) return r;
       }
       return null;
     }
 
-    case "operatorapplication": {
-      return (
-        (await findInExpression(currentUri, e.operatorapplication.left, position, ast, elmJson, tracker, scope)) ??
-        (await findInExpression(currentUri, e.operatorapplication.right, position, ast, elmJson, tracker, scope))
-      );
-    }
+    case "operatorapplication":
+      return (await findInExpr(e.operatorapplication.left, position, ctx, scope)) ??
+             (await findInExpr(e.operatorapplication.right, position, ctx, scope));
 
-    case "ifBlock": {
-      return (
-        (await findInExpression(currentUri, e.ifBlock.clause, position, ast, elmJson, tracker, scope)) ??
-        (await findInExpression(currentUri, e.ifBlock.then, position, ast, elmJson, tracker, scope)) ??
-        (await findInExpression(currentUri, e.ifBlock.else, position, ast, elmJson, tracker, scope))
-      );
-    }
+    case "ifBlock":
+      return (await findInExpr(e.ifBlock.clause, position, ctx, scope)) ??
+             (await findInExpr(e.ifBlock.then, position, ctx, scope)) ??
+             (await findInExpr(e.ifBlock.else, position, ctx, scope));
 
     case "parenthesized":
-      return findInExpression(currentUri, e.parenthesized, position, ast, elmJson, tracker, scope);
+      return findInExpr(e.parenthesized, position, ctx, scope);
 
     case "negation":
-      return findInExpression(currentUri, e.negation, position, ast, elmJson, tracker, scope);
+      return findInExpr(e.negation, position, ctx, scope);
 
     case "tupled": {
-      for (const item of e.tupled) {
-        const result = await findInExpression(currentUri, item, position, ast, elmJson, tracker, scope);
-        if (result) return result;
-      }
+      for (const item of e.tupled) { const r = await findInExpr(item, position, ctx, scope); if (r) return r; }
       return null;
     }
 
     case "list": {
-      for (const item of e.list) {
-        const result = await findInExpression(currentUri, item, position, ast, elmJson, tracker, scope);
-        if (result) return result;
-      }
+      for (const item of e.list) { const r = await findInExpr(item, position, ctx, scope); if (r) return r; }
       return null;
     }
 
     case "record": {
       for (const setter of e.record as any[]) {
-        const result = await findInExpression(currentUri, setter.value[1], position, ast, elmJson, tracker, scope);
-        if (result) return result;
+        const r = await findInExpr(setter.value.expression, position, ctx, scope);
+        if (r) return r;
       }
       return null;
     }
 
     case "recordUpdate": {
-      for (const setter of (e.recordUpdate.updates as any[])) {
-        const result = await findInExpression(currentUri, setter.value[1], position, ast, elmJson, tracker, scope);
-        if (result) return result;
+      // The name before | in { name | ... } is a variable reference
+      if (posInRange(position, e.recordUpdate.name.range)) {
+        const name = e.recordUpdate.name.value;
+        const binding = scopeHas(scope, name);
+        if (binding) return { uri: ctx.uri, range: elmRangeToLsp(binding.range) };
+        const localDecl = findDeclarationWithName(ctx.ast, name);
+        if (localDecl) return { uri: ctx.uri, range: elmRangeToLsp(localDecl.range) };
+      }
+      for (const setter of e.recordUpdate.updates as any[]) {
+        const r = await findInExpr(setter.value.expression, position, ctx, scope);
+        if (r) return r;
       }
       return null;
     }
 
     case "recordAccess":
-      return findInExpression(currentUri, e.recordAccess.expression, position, ast, elmJson, tracker, scope);
+      return findInExpr(e.recordAccess.expression, position, ctx, scope);
 
     default:
       return null;
   }
 }
 
-async function findInLetDeclaration(
-  currentUri: string,
-  decl: Node<LetDeclaration>,
-  position: Position,
-  ast: Ast,
-  elmJson: import("../project/elm-json").ElmJsonFile,
-  tracker: import("../elm-ast/types").ImportTracker,
-  scope: ScopeNames
-): Promise<Location | null> {
-  const d = decl.value;
-  if (d.type === "function") {
-    const argNames = d.function.declaration.value.arguments.flatMap((a) => patternDefinitionNames(a.value));
-    return findInExpression(currentUri, d.function.declaration.value.expression, position, ast, elmJson, tracker, [...scope, ...argNames]);
-  }
-  if (d.type === "destructuring") {
-    return findInExpression(currentUri, d.destructuring.expression, position, ast, elmJson, tracker, scope);
-  }
-  return null;
-}
+// --- Cross-module resolution ---
 
 async function findInModule(
   moduleName: string,
   name: string,
-  elmJson: import("../project/elm-json").ElmJsonFile
+  elmJson: ElmJsonFile
 ): Promise<Location | null> {
   const filePath = await resolveModuleToFile(moduleName, elmJson);
   if (!filePath) return null;
@@ -346,20 +537,10 @@ async function findInModule(
   if (!isExposedFromModule(targetAst, name)) return null;
 
   const decl = findDeclarationWithName(targetAst, name);
-  if (decl) {
-    return {
-      uri: pathToUri(filePath),
-      range: elmRangeToLsp(decl.range),
-    };
-  }
+  if (decl) return { uri: pathToUri(filePath), range: elmRangeToLsp(decl.range) };
 
   const variant = findCustomTypeVariantWithName(targetAst, name);
-  if (variant) {
-    return {
-      uri: pathToUri(filePath),
-      range: elmRangeToLsp(variant.constructor.range),
-    };
-  }
+  if (variant) return { uri: pathToUri(filePath), range: elmRangeToLsp(variant.constructor.range) };
 
   return null;
 }

@@ -117,8 +117,8 @@ export type Pattern =
   | { type: "record"; record: Node<string>[] }
   | { type: "uncons"; uncons: { hd: Node<Pattern>; tl: Node<Pattern> } }
   | { type: "list"; list: Node<Pattern>[] }
-  | { type: "var"; var: string }
-  | { type: "named"; named: { moduleName: string[]; name: string; patterns: Node<Pattern>[] } }
+  | { type: "var"; var: { value: string } }
+  | { type: "named"; named: { qualified: { moduleName: string[]; name: string }; patterns: Node<Pattern>[] } }
   | { type: "as"; as: { pattern: Node<Pattern>; name: Node<string> } }
   | { type: "parentisized"; parentisized: Node<Pattern> };
 
@@ -150,7 +150,7 @@ export type Expression =
 
 export type RecordSetter = [Node<string>, Node<Expression>];
 
-export type CaseBranch = [Node<Pattern>, Node<Expression>];
+export type CaseBranch = { pattern: Node<Pattern>; expression: Node<Expression> };
 
 export type LetDeclaration =
   | { type: "function"; function: Function_ }
@@ -205,24 +205,33 @@ export function findCustomTypeVariantWithName(
 export function isExposedFromModule(ast: Ast, name: string): boolean {
   const exposing = toModuleData(ast).exposingList.value;
   if (exposing.type === "all") return true;
-  return exposing.explicit.some((e) => {
+  for (const e of exposing.explicit) {
     switch (e.value.type) {
-      case "function": return e.value.function.name === name;
-      case "typeOrAlias": return e.value.typeOrAlias.name === name;
-      case "typeexpose": return e.value.typeexpose.name === name;
-      case "infix": return e.value.infix.name === name;
+      case "function": if (e.value.function.name === name) return true; break;
+      case "typeOrAlias": if (e.value.typeOrAlias.name === name) return true; break;
+      case "typeexpose":
+        if (e.value.typeexpose.name === name) return true;
+        // When a type is exposed with (..), all its constructors are exposed
+        const variant = findCustomTypeVariantWithName(ast, name);
+        if (variant) {
+          const typeName = toDeclarationName(variant.declaration.value);
+          if (typeName === e.value.typeexpose.name) return true;
+        }
+        break;
+      case "infix": if (e.value.infix.name === name) return true; break;
     }
-  });
+  }
+  return false;
 }
 
 export function patternDefinitionNames(pattern: Pattern): string[] {
   switch (pattern.type) {
-    case "var": return [pattern.var];
+    case "var": return [pattern.var.value];
     case "as": return [...patternDefinitionNames(pattern.as.pattern.value), pattern.as.name.value];
     case "tuple": return pattern.tuple.flatMap((p) => patternDefinitionNames(p.value));
     case "uncons": return [...patternDefinitionNames(pattern.uncons.hd.value), ...patternDefinitionNames(pattern.uncons.tl.value)];
     case "list": return pattern.list.flatMap((p) => patternDefinitionNames(p.value));
-    case "named": return pattern.named.patterns.flatMap((p) => patternDefinitionNames(p.value));
+    case "named": return (pattern.named.patterns ?? []).flatMap((p) => patternDefinitionNames(p.value));
     case "parentisized": return patternDefinitionNames(pattern.parentisized.value);
     case "record": return pattern.record.map((n) => n.value);
     default: return [];

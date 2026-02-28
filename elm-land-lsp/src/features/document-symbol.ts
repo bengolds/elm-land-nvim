@@ -100,7 +100,7 @@ function expressionSymbols(expr: Node<Expression>): DocumentSymbol[] {
       return e.let.declarations.flatMap(letDeclSymbols).concat(expressionSymbols(e.let.expression));
 
     case "case":
-      return (e.case.cases as any[]).flatMap((branch: any) => expressionSymbols(branch[1]))
+      return (e.case.cases as any[]).flatMap((branch: any) => expressionSymbols(branch.expression))
         .concat(expressionSymbols(e.case.expression));
 
     case "ifBlock":
@@ -135,10 +135,10 @@ function expressionSymbols(expr: Node<Expression>): DocumentSymbol[] {
       return expressionSymbols(e.recordAccess.expression);
 
     case "record":
-      return (e.record as any[]).flatMap((setter: any) => expressionSymbols(setter.value[1]));
+      return (e.record as any[]).flatMap((setter: any) => expressionSymbols(setter.value.expression));
 
     case "recordUpdate":
-      return (e.recordUpdate.updates as any[]).flatMap((setter: any) => expressionSymbols(setter.value[1]));
+      return (e.recordUpdate.updates as any[]).flatMap((setter: any) => expressionSymbols(setter.value.expression));
 
     default:
       return [];

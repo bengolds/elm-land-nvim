@@ -187,7 +187,7 @@ async function findIdentityInExpr(
     case "case":
       { const r = await recurse(e.case.expression); if (r) return r; }
       for (const branch of e.case.cases as any[]) {
-        const r = await recurse(branch[1]); if (r) return r;
+        const r = await recurse(branch.expression); if (r) return r;
       }
       return null;
     case "lambda": return recurse(e.lambda.expression);
@@ -201,10 +201,10 @@ async function findIdentityInExpr(
       return null;
     case "recordAccess": return recurse(e.recordAccess.expression);
     case "record":
-      for (const setter of e.record as any[]) { const r = await recurse(setter.value[1]); if (r) return r; }
+      for (const setter of e.record as any[]) { const r = await recurse(setter.value.expression); if (r) return r; }
       return null;
     case "recordUpdate":
-      for (const setter of e.recordUpdate.updates as any[]) { const r = await recurse(setter.value[1]); if (r) return r; }
+      for (const setter of e.recordUpdate.updates as any[]) { const r = await recurse(setter.value.expression); if (r) return r; }
       return null;
     default: return null;
   }
@@ -319,7 +319,7 @@ function collectRefsInExpr(
       break;
     case "case":
       recurse(e.case.expression);
-      for (const branch of e.case.cases as any[]) recurse(branch[1]);
+      for (const branch of e.case.cases as any[]) recurse(branch.expression);
       break;
     case "lambda": recurse(e.lambda.expression); break;
     case "parenthesized": recurse(e.parenthesized); break;
@@ -327,8 +327,8 @@ function collectRefsInExpr(
     case "tupled": e.tupled.forEach(recurse); break;
     case "list": e.list.forEach(recurse); break;
     case "recordAccess": recurse(e.recordAccess.expression); break;
-    case "record": (e.record as any[]).forEach((s: any) => recurse(s.value[1])); break;
-    case "recordUpdate": (e.recordUpdate.updates as any[]).forEach((s: any) => recurse(s.value[1])); break;
+    case "record": (e.record as any[]).forEach((s: any) => recurse(s.value.expression)); break;
+    case "recordUpdate": (e.recordUpdate.updates as any[]).forEach((s: any) => recurse(s.value.expression)); break;
   }
 }
 

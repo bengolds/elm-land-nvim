@@ -313,8 +313,8 @@ async function walkExprForHover(
   } else if (e.type === "case") {
     const r = await walkExprForHover(e.case.expression, position, ast, elmJson, tracker, currentUri);
     if (r) return r;
-    for (const [_, caseExpr] of e.case.cases) {
-      const r2 = await walkExprForHover(caseExpr, position, ast, elmJson, tracker, currentUri);
+    for (const branch of e.case.cases as any[]) {
+      const r2 = await walkExprForHover(branch.expression, position, ast, elmJson, tracker, currentUri);
       if (r2) return r2;
     }
   } else if (e.type === "lambda") {
