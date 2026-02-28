@@ -238,7 +238,9 @@ export async function startServer(): Promise<void> {
 
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
+    if (done) {
+      process.exit(0);
+    }
     const merged = new Uint8Array(buffer.length + value.length);
     merged.set(buffer);
     merged.set(value, buffer.length);

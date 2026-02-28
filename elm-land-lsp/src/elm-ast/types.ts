@@ -264,9 +264,9 @@ export function patternDefinitionNames(pattern: Pattern): string[] {
   switch (pattern.type) {
     case "var": return [pattern.var.value];
     case "as": return [...patternDefinitionNames(pattern.as.pattern.value), pattern.as.name.value];
-    case "tuple": return pattern.tuple.flatMap((p) => patternDefinitionNames(p.value));
+    case "tuple": return ((pattern.tuple as any).value ?? pattern.tuple).flatMap((p: any) => patternDefinitionNames(p.value));
     case "uncons": return [...patternDefinitionNames(pattern.uncons.hd.value), ...patternDefinitionNames(pattern.uncons.tl.value)];
-    case "list": return pattern.list.flatMap((p) => patternDefinitionNames(p.value));
+    case "list": return ((pattern.list as any).value ?? pattern.list).flatMap((p: any) => patternDefinitionNames(p.value));
     case "named": return (pattern.named.patterns ?? []).flatMap((p) => patternDefinitionNames(p.value));
     case "parentisized": return patternDefinitionNames(pattern.parentisized.value);
     case "record": return pattern.record.map((n) => n.value);

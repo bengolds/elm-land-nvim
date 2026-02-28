@@ -71,9 +71,9 @@ function bindingsFromPattern(pattern: Node<Pattern>): ScopeBinding[] {
   switch (p.type) {
     case "var": return [{ name: p.var.value, range: pattern.range }];
     case "as": return [...bindingsFromPattern(p.as.pattern), { name: p.as.name.value, range: p.as.name.range }];
-    case "tuple": return p.tuple.flatMap(bindingsFromPattern);
+    case "tuple": return ((p.tuple as any).value ?? p.tuple).flatMap(bindingsFromPattern);
     case "uncons": return [...bindingsFromPattern(p.uncons.hd), ...bindingsFromPattern(p.uncons.tl)];
-    case "list": return p.list.flatMap(bindingsFromPattern);
+    case "list": return ((p.list as any).value ?? p.list).flatMap(bindingsFromPattern);
     case "named": return (p.named.patterns ?? []).flatMap(bindingsFromPattern);
     case "parentisized": return bindingsFromPattern(p.parentisized);
     case "record": return p.record.map((n) => ({ name: n.value, range: n.range }));
@@ -329,7 +329,7 @@ async function findInPattern(
   }
 
   if (p.type === "tuple") {
-    for (const sub of p.tuple) { const r = await findInPattern(sub, position, ctx); if (r) return r; }
+    for (const sub of ((p.tuple as any).value ?? p.tuple)) { const r = await findInPattern(sub, position, ctx); if (r) return r; }
   }
   if (p.type === "uncons") {
     return (await findInPattern(p.uncons.hd, position, ctx)) ?? (await findInPattern(p.uncons.tl, position, ctx));
