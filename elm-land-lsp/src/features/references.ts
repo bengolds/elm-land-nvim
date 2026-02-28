@@ -10,6 +10,8 @@ import {
   type Node,
   type Declaration,
   type Expression,
+  type Pattern,
+  type TypeAnnotation,
   type Range as ElmRange,
   findDeclarationWithName,
   findCustomTypeVariantWithName,
@@ -35,14 +37,14 @@ function positionInRange(pos: Position, r: ElmRange): boolean {
   return true;
 }
 
-// The "identity" of a symbol: which module defines it + its name
 type SymbolIdentity = {
-  defModule: string; // e.g., "Helpers"
-  name: string;      // e.g., "add"
+  defModule: string;
+  name: string;
   kind: "value" | "type" | "constructor";
 };
 
-// Resolve what symbol the cursor is on, returning its canonical identity
+// --- Symbol resolution at cursor ---
+
 async function resolveSymbolAtPosition(
   uri: string,
   position: Position,
@@ -51,7 +53,6 @@ async function resolveSymbolAtPosition(
 ): Promise<SymbolIdentity | null> {
   const currentModule = toModuleName(ast);
 
-  // Check imports — cursor on exposed value
   for (const imp of ast.imports) {
     if (imp.value.exposingList?.value.type === "explicit") {
       for (const exposed of imp.value.exposingList.value.explicit) {
@@ -72,20 +73,17 @@ async function resolveSymbolAtPosition(
     }
   }
 
-  // Check declarations — walk to find functionOrValue under cursor
   const tracker = createImportTracker(ast);
 
   for (const decl of ast.declarations) {
     if (!positionInRange(position, decl.range)) continue;
 
-    // Check if cursor is on the declaration name itself
     const declName = getDeclNameNode(decl.value);
     if (declName && positionInRange(position, declName.range)) {
       const kind = decl.value.type === "typedecl" || decl.value.type === "typeAlias" ? "type" : "value";
       return { defModule: currentModule, name: declName.value, kind };
     }
 
-    // Check constructors
     if (decl.value.type === "typedecl") {
       for (const ctor of decl.value.typedecl.constructors) {
         if (positionInRange(position, ctor.value.name.range)) {
@@ -94,8 +92,15 @@ async function resolveSymbolAtPosition(
       }
     }
 
-    // Walk expression tree
     if (decl.value.type === "function") {
+      // Check signature name
+      if (decl.value.function.signature) {
+        const sigName = decl.value.function.signature.value.name;
+        if (positionInRange(position, sigName.range)) {
+          return { defModule: currentModule, name: sigName.value, kind: "value" };
+        }
+      }
+
       const result = await findIdentityInExpr(
         decl.value.function.declaration.value.expression,
         position, ast, elmJson, tracker, currentModule
@@ -138,7 +143,6 @@ async function findIdentityInExpr(
       return { defModule: resolved[0]!, name, kind: "value" };
     }
 
-    // Check same-file
     if (findDeclarationWithName(ast, name)) {
       return { defModule: currentModule, name, kind: "value" };
     }
@@ -146,7 +150,6 @@ async function findIdentityInExpr(
       return { defModule: currentModule, name, kind: "constructor" };
     }
 
-    // Check imports
     const fromExplicit = tracker.explicitExposing.get(name);
     if (fromExplicit?.length) {
       return { defModule: fromExplicit[0]!, name, kind: "value" };
@@ -166,7 +169,6 @@ async function findIdentityInExpr(
     return null;
   }
 
-  // Recurse into sub-expressions
   const recurse = (child: Node<Expression>) =>
     findIdentityInExpr(child, position, ast, elmJson, tracker, currentModule);
 
@@ -211,7 +213,21 @@ async function findIdentityInExpr(
   }
 }
 
-// Scan a single file's AST for all references to a given symbol identity
+// --- Reference collection ---
+
+// Calculate the range for just the name part of a qualified expression.
+// For "Module.name" at range [r, c, r, c+len], the name starts after the last dot.
+function nameRangeOfQualifiedExpr(exprRange: ElmRange, moduleParts: string[], name: string): ElmRange {
+  const prefix = moduleParts.join(".") + ".";
+  const nameStart = exprRange[1] + prefix.length;
+  return [exprRange[0], nameStart, exprRange[2], nameStart + name.length - 1];
+}
+
+// For exposing list items like `Foo(..)`, we want just the name range, not including `(..)`.
+function nameRangeOfExposed(exposedRange: ElmRange, name: string): ElmRange {
+  return [exposedRange[0], exposedRange[1], exposedRange[0], exposedRange[1] + name.length - 1];
+}
+
 function collectRefsInFile(
   ast: Ast,
   fileUri: string,
@@ -221,30 +237,28 @@ function collectRefsInFile(
   const locations: Location[] = [];
   const tracker = createImportTracker(ast);
 
-  // Check if this file imports the target module
-  const canReference = canFileReference(ast, target, fileModuleName);
-  if (!canReference) return locations;
+  if (!canFileReference(ast, target, fileModuleName)) return locations;
 
-  // Check import exposing list
+  // Module exposing list (Bug 5 fix: use name-only range)
+  if (fileModuleName === target.defModule) {
+    const modData = toModuleData(ast);
+    if (modData.exposingList.value.type === "explicit") {
+      for (const exposed of modData.exposingList.value.explicit) {
+        if (getExposedNameStr(exposed.value) === target.name) {
+          locations.push({ uri: fileUri, range: elmRangeToLsp(nameRangeOfExposed(exposed.range, target.name)) });
+        }
+      }
+    }
+  }
+
+  // Import exposing lists (Bug 5 fix: use name-only range)
   for (const imp of ast.imports) {
     if (imp.value.moduleName.value.join(".") !== target.defModule) continue;
     if (imp.value.exposingList?.value.type === "explicit") {
       for (const exposed of imp.value.exposingList.value.explicit) {
         const name = getExposedNameStr(exposed.value);
         if (name === target.name) {
-          locations.push({ uri: fileUri, range: elmRangeToLsp(exposed.range) });
-        }
-      }
-    }
-  }
-
-  // Check module exposing list (for same-module definitions)
-  if (fileModuleName === target.defModule) {
-    const modData = toModuleData(ast);
-    if (modData.exposingList.value.type === "explicit") {
-      for (const exposed of modData.exposingList.value.explicit) {
-        if (getExposedNameStr(exposed.value) === target.name) {
-          locations.push({ uri: fileUri, range: elmRangeToLsp(exposed.range) });
+          locations.push({ uri: fileUri, range: elmRangeToLsp(nameRangeOfExposed(exposed.range, target.name)) });
         }
       }
     }
@@ -252,7 +266,7 @@ function collectRefsInFile(
 
   // Walk declarations
   for (const decl of ast.declarations) {
-    // Check if this IS the definition
+    // Definition name
     if (fileModuleName === target.defModule) {
       const nameNode = getDeclNameNode(decl.value);
       if (nameNode && nameNode.value === target.name) {
@@ -267,21 +281,158 @@ function collectRefsInFile(
       }
     }
 
-    // Check type annotation — signature name
+    // Type annotation signature name
     if (decl.value.type === "function" && decl.value.function.signature) {
       const sigName = decl.value.function.signature.value.name;
       if (sigName.value === target.name && fileModuleName === target.defModule) {
         locations.push({ uri: fileUri, range: elmRangeToLsp(sigName.range) });
       }
+
+      // Bug 3 fix: Walk type annotation for type references
+      if (target.kind === "type") {
+        collectRefsInTypeAnnotation(decl.value.function.signature.value.typeAnnotation, locations, fileUri, target, tracker, fileModuleName);
+      }
+    }
+
+    // Type alias body
+    if (decl.value.type === "typeAlias" && target.kind === "type") {
+      collectRefsInTypeAnnotation(decl.value.typeAlias.typeAnnotation, locations, fileUri, target, tracker, fileModuleName);
+    }
+
+    // Custom type constructor arguments
+    if (decl.value.type === "typedecl" && target.kind === "type") {
+      for (const ctor of decl.value.typedecl.constructors) {
+        for (const arg of ctor.value.arguments) {
+          collectRefsInTypeAnnotation(arg, locations, fileUri, target, tracker, fileModuleName);
+        }
+      }
+    }
+
+    // Port type annotation
+    if (decl.value.type === "port" && target.kind === "type") {
+      collectRefsInTypeAnnotation(decl.value.port.typeAnnotation, locations, fileUri, target, tracker, fileModuleName);
     }
 
     // Walk expression for references
     if (decl.value.type === "function") {
       collectRefsInExpr(decl.value.function.declaration.value.expression, locations, fileUri, target, tracker, fileModuleName);
+      // Bug 2 fix: walk function argument patterns for constructor refs
+      if (target.kind === "constructor") {
+        for (const arg of decl.value.function.declaration.value.arguments) {
+          collectRefsInPattern(arg, locations, fileUri, target, tracker, fileModuleName);
+        }
+      }
     }
   }
 
   return locations;
+}
+
+// Bug 3 fix: Walk type annotations for type name references
+function collectRefsInTypeAnnotation(
+  ta: Node<TypeAnnotation>,
+  locations: Location[],
+  fileUri: string,
+  target: SymbolIdentity,
+  tracker: ReturnType<typeof createImportTracker>,
+  fileModuleName: string
+): void {
+  if (!ta?.value) return;
+  const t = ta.value;
+
+  if (t.type === "typed") {
+    const mn = t.typed.moduleNameAndName.value;
+    const name = mn.name;
+    if (name === target.name) {
+      if (mn.moduleName.length > 0) {
+        const mod = mn.moduleName.join(".");
+        const resolved = tracker.aliasMapping.get(mod) ?? [mod];
+        if (resolved.includes(target.defModule)) {
+          locations.push({ uri: fileUri, range: elmRangeToLsp(t.typed.moduleNameAndName.range) });
+        }
+      } else if (fileModuleName === target.defModule) {
+        locations.push({ uri: fileUri, range: elmRangeToLsp(t.typed.moduleNameAndName.range) });
+      } else {
+        const fromExplicit = tracker.explicitExposing.get(name);
+        if (fromExplicit?.includes(target.defModule)) {
+          locations.push({ uri: fileUri, range: elmRangeToLsp(t.typed.moduleNameAndName.range) });
+        } else if (tracker.unknownImports.includes(target.defModule)) {
+          locations.push({ uri: fileUri, range: elmRangeToLsp(t.typed.moduleNameAndName.range) });
+        }
+      }
+    }
+    for (const arg of t.typed.args) {
+      collectRefsInTypeAnnotation(arg, locations, fileUri, target, tracker, fileModuleName);
+    }
+  } else if (t.type === "function") {
+    collectRefsInTypeAnnotation(t.function.left, locations, fileUri, target, tracker, fileModuleName);
+    collectRefsInTypeAnnotation(t.function.right, locations, fileUri, target, tracker, fileModuleName);
+  } else if (t.type === "tupled") {
+    for (const item of t.tupled) {
+      collectRefsInTypeAnnotation(item, locations, fileUri, target, tracker, fileModuleName);
+    }
+  } else if (t.type === "record") {
+    for (const field of ((t.record as any).value ?? t.record)) {
+      collectRefsInTypeAnnotation(field.value.typeAnnotation, locations, fileUri, target, tracker, fileModuleName);
+    }
+  } else if (t.type === "genericRecord") {
+    for (const field of ((t.genericRecord.values as any).value ?? [])) {
+      collectRefsInTypeAnnotation(field.value.typeAnnotation, locations, fileUri, target, tracker, fileModuleName);
+    }
+  }
+}
+
+// Bug 2 fix: Walk patterns for constructor references
+function collectRefsInPattern(
+  pat: Node<Pattern>,
+  locations: Location[],
+  fileUri: string,
+  target: SymbolIdentity,
+  tracker: ReturnType<typeof createImportTracker>,
+  fileModuleName: string
+): void {
+  if (!pat?.value) return;
+  const p = pat.value;
+
+  if (p.type === "named") {
+    const q = p.named.qualified;
+    if (q.name === target.name) {
+      if (q.moduleName.length > 0) {
+        const mod = q.moduleName.join(".");
+        const resolved = tracker.aliasMapping.get(mod) ?? [mod];
+        if (resolved.includes(target.defModule)) {
+          locations.push({ uri: fileUri, range: elmRangeToLsp(pat.range) });
+        }
+      } else if (fileModuleName === target.defModule) {
+        locations.push({ uri: fileUri, range: elmRangeToLsp(pat.range) });
+      } else {
+        const fromExplicit = tracker.explicitExposing.get(q.name);
+        if (fromExplicit?.includes(target.defModule)) {
+          locations.push({ uri: fileUri, range: elmRangeToLsp(pat.range) });
+        } else if (tracker.unknownImports.includes(target.defModule)) {
+          locations.push({ uri: fileUri, range: elmRangeToLsp(pat.range) });
+        }
+      }
+    }
+    for (const sub of (p.named.patterns ?? [])) {
+      collectRefsInPattern(sub, locations, fileUri, target, tracker, fileModuleName);
+    }
+  } else if (p.type === "tuple") {
+    for (const sub of ((p.tuple as any).value ?? p.tuple)) {
+      collectRefsInPattern(sub, locations, fileUri, target, tracker, fileModuleName);
+    }
+  } else if (p.type === "uncons") {
+    collectRefsInPattern(p.uncons.hd, locations, fileUri, target, tracker, fileModuleName);
+    collectRefsInPattern(p.uncons.tl, locations, fileUri, target, tracker, fileModuleName);
+  } else if (p.type === "list") {
+    for (const sub of ((p.list as any).value ?? p.list)) {
+      collectRefsInPattern(sub, locations, fileUri, target, tracker, fileModuleName);
+    }
+  } else if (p.type === "as") {
+    collectRefsInPattern(p.as.pattern, locations, fileUri, target, tracker, fileModuleName);
+  } else if (p.type === "parentisized") {
+    collectRefsInPattern(p.parentisized, locations, fileUri, target, tracker, fileModuleName);
+  }
 }
 
 function collectRefsInExpr(
@@ -305,18 +456,20 @@ function collectRefsInExpr(
       const qualifiedModule = moduleParts.join(".");
       const resolved = tracker.aliasMapping.get(qualifiedModule) ?? [qualifiedModule];
       if (resolved.includes(target.defModule)) {
-        locations.push({ uri: fileUri, range: elmRangeToLsp(expr.range) });
+        // Bug 4 fix: only record the name range, not the full qualified range
+        const nameRange = nameRangeOfQualifiedExpr(expr.range, moduleParts, name);
+        locations.push({ uri: fileUri, range: elmRangeToLsp(nameRange) });
       }
     } else {
-      // Unqualified — could be same-module or imported
+      // Unqualified
       if (fileModuleName === target.defModule) {
         locations.push({ uri: fileUri, range: elmRangeToLsp(expr.range) });
       } else {
+        // Bug 1 fix: check explicitExposing first, only fall through to unknownImports if not found
         const fromExplicit = tracker.explicitExposing.get(name);
         if (fromExplicit?.includes(target.defModule)) {
           locations.push({ uri: fileUri, range: elmRangeToLsp(expr.range) });
-        }
-        if (tracker.unknownImports.includes(target.defModule)) {
+        } else if (tracker.unknownImports.includes(target.defModule)) {
           locations.push({ uri: fileUri, range: elmRangeToLsp(expr.range) });
         }
       }
@@ -333,16 +486,42 @@ function collectRefsInExpr(
     case "ifBlock": recurse(e.ifBlock.clause); recurse(e.ifBlock.then); recurse(e.ifBlock.else); break;
     case "let":
       for (const d of e.let.declarations) {
-        if (d.value.type === "function") recurse(d.value.function.declaration.value.expression);
-        else if (d.value.type === "destructuring") recurse(d.value.destructuring.expression);
+        if (d.value.type === "function") {
+          recurse(d.value.function.declaration.value.expression);
+          // Walk let-function arg patterns for constructor refs
+          if (target.kind === "constructor") {
+            for (const arg of d.value.function.declaration.value.arguments) {
+              collectRefsInPattern(arg, locations, fileUri, target, tracker, fileModuleName);
+            }
+          }
+        } else if (d.value.type === "destructuring") {
+          recurse(d.value.destructuring.expression);
+          if (target.kind === "constructor") {
+            collectRefsInPattern(d.value.destructuring.pattern, locations, fileUri, target, tracker, fileModuleName);
+          }
+        }
       }
       recurse(e.let.expression);
       break;
     case "case":
       recurse(e.case.expression);
-      for (const branch of e.case.cases as any[]) recurse(branch.expression);
+      for (const branch of e.case.cases as any[]) {
+        // Bug 2 fix: walk case patterns for constructor refs
+        if (target.kind === "constructor") {
+          collectRefsInPattern(branch.pattern, locations, fileUri, target, tracker, fileModuleName);
+        }
+        recurse(branch.expression);
+      }
       break;
-    case "lambda": recurse(e.lambda.expression); break;
+    case "lambda":
+      // Walk lambda patterns for constructor refs
+      if (target.kind === "constructor") {
+        for (const pat of e.lambda.patterns) {
+          collectRefsInPattern(pat, locations, fileUri, target, tracker, fileModuleName);
+        }
+      }
+      recurse(e.lambda.expression);
+      break;
     case "parenthesized": recurse(e.parenthesized); break;
     case "negation": recurse(e.negation); break;
     case "tupled": e.tupled.forEach(recurse); break;
@@ -357,13 +536,11 @@ function canFileReference(ast: Ast, target: SymbolIdentity, fileModuleName: stri
   if (fileModuleName === target.defModule) return true;
   for (const imp of ast.imports) {
     if (imp.value.moduleName.value.join(".") === target.defModule) return true;
-    // Check aliases
     if (imp.value.moduleAlias) {
       const alias = imp.value.moduleAlias.value.join(".");
       if (alias === target.defModule) return true;
     }
   }
-  // Prelude modules are always accessible
   const preludeModules = ["Basics", "List", "Maybe", "Result", "String", "Char", "Tuple", "Debug", "Platform", "Platform.Cmd", "Platform.Sub"];
   return preludeModules.includes(target.defModule);
 }
@@ -398,7 +575,6 @@ export async function findReferences(
   const identity = await resolveSymbolAtPosition(uri, position, ast, elmJson);
   if (!identity) return [];
 
-  // Scan all files in source directories
   const allLocations: Location[] = [];
   const glob = new Glob("**/*.elm");
 
@@ -414,7 +590,6 @@ export async function findReferences(
         const refs = collectRefsInFile(fileAst, fileUri, identity, fileModule);
 
         if (!includeDeclaration && fileModule === identity.defModule) {
-          // Filter out the definition itself
           const declNode = getDeclNameNode(
             (findDeclarationWithName(fileAst, identity.name) ?? { value: {} as any }).value
           );
@@ -434,5 +609,12 @@ export async function findReferences(
     } catch {}
   }
 
-  return allLocations;
+  // Deduplicate by uri+range
+  const seen = new Set<string>();
+  return allLocations.filter((loc) => {
+    const key = `${loc.uri}:${loc.range.start.line}:${loc.range.start.character}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
